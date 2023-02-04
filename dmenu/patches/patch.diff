@@ -1,0 +1,183 @@
+diff -ur dmenu/config.def.h dmenu-5.0/config.def.h
+--- config.def.h	2023-01-29 08:31:33.511621352 +0200
++++ config.def.h	2023-01-29 08:28:23.978883803 +0200
+@@ -2,22 +2,29 @@
+ /* Default settings; can be overriden by command line. */
+ 
+ static int topbar = 1;                      /* -b  option; if 0, dmenu appears at bottom     */
++static int colorprompt = 1;                /* -p  option; if 1, prompt uses SchemeSel, otherwise SchemeNorm */
+ /* -fn option overrides fonts[0]; default X11 font or font set */
+ static const char *fonts[] = {
+-	"monospace:size=10"
++	"Terminus:size=9"
+ };
+ static const char *prompt      = NULL;      /* -p  option; prompt to the left of input field */
+ static const char *colors[SchemeLast][2] = {
+ 	/*     fg         bg       */
+-	[SchemeNorm] = { "#bbbbbb", "#222222" },
+-	[SchemeSel] = { "#eeeeee", "#005577" },
+-	[SchemeOut] = { "#000000", "#00ffff" },
++	[SchemeNorm] = { "#666666", "#1f2024" },
++	[SchemeSel] = { "#f8f9f8", "#1f2024" },
++	[SchemeOut] = { "#1f2024", "#f8f9f8" },
+ };
+ /* -l option; if nonzero, dmenu uses vertical list with given number of lines */
+-static unsigned int lines      = 0;
++static unsigned int lines      = 25;
++/* -h option; minimum height of a menu line */
++static unsigned int lineheight = 0;
++static unsigned int min_lineheight = 25;
+ 
+ /*
+  * Characters not considered part of a word while deleting words
+  * for example: " /?\"&[]"
+  */
+ static const char worddelimiters[] = " ";
++
++/* Size of the window border */
++static const unsigned int border_width = 1;
+diff -ur dmenu.1 dmenu.1
+--- dmenu.1	2023-01-29 08:31:33.514954676 +0200
++++ dmenu.1	2023-01-29 08:28:23.978883803 +0200
+@@ -6,6 +6,8 @@
+ .RB [ \-bfiv ]
+ .RB [ \-l
+ .IR lines ]
++.RB [ \-h
++.IR height ]
+ .RB [ \-m
+ .IR monitor ]
+ .RB [ \-p
+@@ -50,6 +52,9 @@
+ .BI \-l " lines"
+ dmenu lists items vertically, with the given number of lines.
+ .TP
++.BI \-h " height"
++dmenu uses a menu line of at least 'height' pixels tall, but no less than 8.
++.TP
+ .BI \-m " monitor"
+ dmenu is displayed on the monitor number supplied. Monitor numbers are starting
+ from 0.
+diff -ur dmenu.c dmenu.c
+--- dmenu.c	2023-01-29 08:33:33.948073615 +0200
++++ dmenu.c	2023-01-29 08:28:23.978883803 +0200
+@@ -89,6 +89,15 @@
+ 			break;
+ }
+ 
++static int
++max_textw(void)
++{
++	int len = 0;
++	for (struct item *item = items; item && item->text; item++)
++		len = MAX(TEXTW(item->text), len);
++	return len;
++}
++
+ static void
+ cleanup(void)
+ {
+@@ -131,13 +140,14 @@
+ {
+ 	unsigned int curpos;
+ 	struct item *item;
+-	int x = 0, y = 0, w;
++	int x = 0, y = 0, fh = drw->fonts->h, w;
+ 
+ 	drw_setscheme(drw, scheme[SchemeNorm]);
+ 	drw_rect(drw, 0, 0, mw, mh, 1, 1);
+ 
+ 	if (prompt && *prompt) {
+-		drw_setscheme(drw, scheme[SchemeSel]);
++		if (colorprompt)
++			drw_setscheme(drw, scheme[SchemeSel]);
+ 		x = drw_text(drw, x, 0, promptw, bh, lrpad / 2, prompt, 0);
+ 	}
+ 	/* draw input field */
+@@ -148,13 +158,13 @@
+ 	curpos = TEXTW(text) - TEXTW(&text[cursor]);
+ 	if ((curpos += lrpad / 2 - 1) < w) {
+ 		drw_setscheme(drw, scheme[SchemeNorm]);
+-		drw_rect(drw, x + curpos, 2, 2, bh - 4, 1, 0);
++		drw_rect(drw, x + curpos, 2 + (bh - fh) / 2, 2, fh - 4, 1, 0);
+ 	}
+ 
+ 	if (lines > 0) {
+ 		/* draw vertical list */
+ 		for (item = curr; item != next; item = item->right)
+-			drawitem(item, x, y += bh, mw - x);
++			drawitem(item, 0, y += bh, mw - x);
+ 	} else if (matches) {
+ 		/* draw horizontal list */
+ 		x += inputw;
+@@ -609,8 +619,10 @@
+ 
+ 	/* calculate menu geometry */
+ 	bh = drw->fonts->h + 2;
++	bh = MAX(bh,lineheight);	/* make a menu line AT LEAST 'lineheight' tall */
+ 	lines = MAX(lines, 0);
+ 	mh = (lines + 1) * bh;
++	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
+ #ifdef XINERAMA
+ 	i = 0;
+ 	if (parentwin == root && (info = XineramaQueryScreens(dpy, &n))) {
+@@ -637,9 +649,9 @@
+ 				if (INTERSECT(x, y, 1, 1, info[i]))
+ 					break;
+ 
+-		x = info[i].x_org;
+-		y = info[i].y_org + (topbar ? 0 : info[i].height - mh);
+-		mw = info[i].width;
++		mw = MIN(MAX(max_textw() + promptw, 100), info[i].width);
++		x = info[i].x_org + ((info[i].width  - mw) / 2);
++		y = info[i].y_org + ((info[i].height - mh) / 2);
+ 		XFree(info);
+ 	} else
+ #endif
+@@ -647,11 +659,10 @@
+ 		if (!XGetWindowAttributes(dpy, parentwin, &wa))
+ 			die("could not get embedding window attributes: 0x%lx",
+ 			    parentwin);
+-		x = 0;
+-		y = topbar ? 0 : wa.height - mh;
+-		mw = wa.width;
++		mw = MIN(MAX(max_textw() + promptw, 100), wa.width);
++		x = (wa.width  - mw) / 2;
++		y = (wa.height - mh) / 2;
+ 	}
+-	promptw = (prompt && *prompt) ? TEXTW(prompt) - lrpad / 4 : 0;
+ 	inputw = MIN(inputw, mw/3);
+ 	match();
+ 
+@@ -659,9 +670,10 @@
+ 	swa.override_redirect = True;
+ 	swa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
+ 	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask;
+-	win = XCreateWindow(dpy, parentwin, x, y, mw, mh, 0,
++	win = XCreateWindow(dpy, parentwin, x, y, mw, mh, border_width,
+ 	                    CopyFromParent, CopyFromParent, CopyFromParent,
+ 	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
++	XSetWindowBorder(dpy, win, scheme[SchemeOut][ColBg].pixel);
+ 	XSetClassHint(dpy, win, &ch);
+ 
+ 
+@@ -689,7 +701,7 @@
+ static void
+ usage(void)
+ {
+-	fputs("usage: dmenu [-bfiv] [-l lines] [-p prompt] [-fn font] [-m monitor]\n"
++	fputs("usage: dmenu [-bfiv] [-l lines] [-h height] [-p prompt] [-fn font] [-m monitor]\n"
+ 	      "             [-nb color] [-nf color] [-sb color] [-sf color] [-w windowid]\n", stderr);
+ 	exit(1);
+ }
+@@ -717,6 +729,10 @@
+ 		/* these options take one argument */
+ 		else if (!strcmp(argv[i], "-l"))   /* number of lines in vertical list */
+ 			lines = atoi(argv[++i]);
++		else if (!strcmp(argv[i], "-h")) { /* minimum height of one menu line */
++			lineheight = atoi(argv[++i]);
++			lineheight = MAX(lineheight, min_lineheight);
++		}
+ 		else if (!strcmp(argv[i], "-m"))
+ 			mon = atoi(argv[++i]);
+ 		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
